@@ -17,7 +17,8 @@ let package = Package(
             ],
             path: "Sources/SampleApp",
             resources: [
-                .process("PhpScripts")
+                .process("PhpScripts"),
+                .process("payload")
             ]
         )
     ]

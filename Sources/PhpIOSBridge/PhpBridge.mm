@@ -339,9 +339,30 @@ static void phpios_sapi_error(int type, const char *error_msg, ...) {
                                     env:(NSDictionary<NSString*, NSString*>*)env
                              requestUri:(NSString*)requestUri
                             queryString:(NSString*)queryString {
-    NSString* scriptName = [@"/" stringByAppendingString:[scriptPath lastPathComponent]];
     NSString* documentRoot = env[@"DOCUMENT_ROOT"] ?: [scriptPath stringByDeletingLastPathComponent];
+    NSString* scriptName = env[@"SCRIPT_NAME"];
+    if (!scriptName) {
+        NSString* normalizedRoot = [documentRoot stringByStandardizingPath];
+        NSString* normalizedScript = [scriptPath stringByStandardizingPath];
+        if ([normalizedScript hasPrefix:normalizedRoot]) {
+            NSString* relative = [normalizedScript substringFromIndex:normalizedRoot.length];
+            if (relative.length == 0) {
+                scriptName = [@"/" stringByAppendingString:[scriptPath lastPathComponent]];
+            } else if (![relative hasPrefix:@"/"]) {
+                scriptName = [@"/" stringByAppendingString:relative];
+            } else {
+                scriptName = relative;
+            }
+        } else {
+            scriptName = [@"/" stringByAppendingString:[scriptPath lastPathComponent]];
+        }
+    }
     NSString* phpSelf = env[@"PHP_SELF"] ?: scriptName;
+    NSString* serverName = env[@"SERVER_NAME"] ?: env[@"HTTP_HOST"] ?: @"localhost";
+    NSString* httpHost = env[@"HTTP_HOST"] ?: serverName;
+    NSString* serverPort = env[@"SERVER_PORT"] ?: @"80";
+    NSString* requestScheme = env[@"REQUEST_SCHEME"] ?: @"http";
+    NSString* https = env[@"HTTPS"] ?: @"off";
 
     NSString* escapedScript = [self phpEscapedString:scriptPath];
     NSString* escapedScriptName = [self phpEscapedString:scriptName];
@@ -349,6 +370,11 @@ static void phpios_sapi_error(int type, const char *error_msg, ...) {
     NSString* escapedQuery = [self phpEscapedString:queryString ?: @""];
     NSString* escapedDocRoot = [self phpEscapedString:documentRoot];
     NSString* escapedSelf = [self phpEscapedString:phpSelf];
+    NSString* escapedServerName = [self phpEscapedString:serverName];
+    NSString* escapedHttpHost = [self phpEscapedString:httpHost];
+    NSString* escapedServerPort = [self phpEscapedString:serverPort];
+    NSString* escapedRequestScheme = [self phpEscapedString:requestScheme];
+    NSString* escapedHttps = [self phpEscapedString:https];
 
     NSString* serverSetup = [NSString stringWithFormat:
                              @"$_SERVER['SCRIPT_FILENAME']='%@';"
@@ -358,13 +384,23 @@ static void phpios_sapi_error(int type, const char *error_msg, ...) {
                              @"$_SERVER['DOCUMENT_ROOT']='%@';"
                              @"$_SERVER['REQUEST_METHOD']='GET';"
                              @"$_SERVER['PHP_SELF']='%@';"
-                             @"$_SERVER['SERVER_SOFTWARE']='PHP-iOS';",
+                             @"$_SERVER['SERVER_SOFTWARE']='PHP-iOS';"
+                             @"$_SERVER['SERVER_NAME']='%@';"
+                             @"$_SERVER['HTTP_HOST']='%@';"
+                             @"$_SERVER['SERVER_PORT']='%@';"
+                             @"$_SERVER['REQUEST_SCHEME']='%@';"
+                             @"$_SERVER['HTTPS']='%@';",
                              escapedScript,
                              escapedScriptName,
                              escapedRequest,
                              escapedQuery,
                              escapedDocRoot,
-                             escapedSelf];
+                             escapedSelf,
+                             escapedServerName,
+                             escapedHttpHost,
+                             escapedServerPort,
+                             escapedRequestScheme,
+                             escapedHttps];
     zend_eval_string([serverSetup UTF8String], NULL, "PhpIOS");
 }
 
