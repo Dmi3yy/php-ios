@@ -8,7 +8,7 @@ set -e
 # Configuration
 PHP_VERSION="8.4.16"
 MIN_IOS_VERSION="16.0"
-EXTENSIONS="json,mbstring,pcre,ctype,filter,tokenizer,xml,dom,libzip"
+EXTENSIONS="json,mbstring,pcre,ctype,filter,tokenizer,xml,dom,libzip,sqlite3,pdo_sqlite"
 SDK_NAME="iphoneos"
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 ROOT_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
@@ -205,6 +205,8 @@ configure_php() {
     export EXTRA_LDFLAGS="-Wl,-no_warn_duplicate_libraries"
     export LIBXML_CFLAGS="-I$SDK_PATH/usr/include/libxml2"
     export LIBXML_LIBS="-lxml2"
+    export SQLITE_CFLAGS="-I$SDK_PATH/usr/include"
+    export SQLITE_LIBS="-lsqlite3"
     
     # Configure PHP
     ./configure \
@@ -227,8 +229,8 @@ configure_php() {
         --without-mysql \
         --without-mysqli \
         --without-pdo-mysql \
-        --without-pdo-sqlite \
-        --without-sqlite3 \
+        --with-pdo-sqlite \
+        --with-sqlite3 \
         --without-xmlrpc \
         --without-xsl \
         --without-readline \
@@ -267,7 +269,8 @@ configure_php() {
         --enable-tokenizer \
         --enable-xml \
         --enable-dom \
-        --enable-libzip
+        --enable-libzip \
+        --enable-pdo
     
     cd ..
     log_info "PHP configuration complete"

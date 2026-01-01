@@ -49,6 +49,7 @@ let package = Package(
             ],
             linkerSettings: [
                 .linkedLibrary("resolv", .when(platforms: [.iOS])),
+                .linkedLibrary("sqlite3", .when(platforms: [.iOS])),
                 .linkedLibrary("xml2", .when(platforms: [.iOS])),
                 .linkedLibrary("php-ios", .when(platforms: [.iOS])),
                 .unsafeFlags(["-L", phpLibDir], .when(platforms: [.iOS])),
