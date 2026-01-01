@@ -159,4 +159,19 @@ final class PhpEngineTests: XCTestCase {
         
         XCTAssertEqual(result, "HELLO WORLD")
     }
+
+    func testIconvPolyfillAvailable() throws {
+        let result = try engine.runInline("echo function_exists('iconv') ? '1' : '0';")
+        XCTAssertEqual(result.stdout.trimmingCharacters(in: .whitespacesAndNewlines), "1")
+    }
+
+    func testServerAcceptLanguageDefault() throws {
+        let result = try engine.runInline("echo $_SERVER['HTTP_ACCEPT_LANGUAGE'] ?? '';")
+        XCTAssertFalse(result.stdout.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+    }
+
+    func testManagerModeConstantDefined() throws {
+        let result = try engine.runInline("echo defined('IN_MANAGER_MODE') ? '1' : '0';")
+        XCTAssertEqual(result.stdout.trimmingCharacters(in: .whitespacesAndNewlines), "1")
+    }
 }

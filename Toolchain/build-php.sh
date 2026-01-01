@@ -8,7 +8,7 @@ set -e
 # Configuration
 PHP_VERSION="8.4.16"
 MIN_IOS_VERSION="16.0"
-EXTENSIONS="json,mbstring,pcre,ctype,filter,tokenizer,xml,dom,libzip,sqlite3,pdo_sqlite"
+EXTENSIONS="json,mbstring,pcre,ctype,filter,tokenizer,xml,dom,libzip,sqlite3,pdo_sqlite,session"
 SDK_NAME="iphoneos"
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 ROOT_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
@@ -270,7 +270,8 @@ configure_php() {
         --enable-xml \
         --enable-dom \
         --enable-libzip \
-        --enable-pdo
+        --enable-pdo \
+        --enable-session
     
     cd ..
     log_info "PHP configuration complete"

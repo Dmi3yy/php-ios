@@ -9,6 +9,8 @@ NS_ASSUME_NONNULL_BEGIN
 
 /// Initialize the PHP bridge
 - (instancetype)init;
+/// Initialize the PHP bridge with a php.ini path override
+- (instancetype)initWithIniPath:(nullable NSString*)iniPath;
 
 /// Execute inline PHP code
 /// @param code PHP code to execute

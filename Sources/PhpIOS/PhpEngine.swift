@@ -96,7 +96,8 @@ public final class PhpEngine {
     private let bridge: PhpBridge
     
     private init() throws {
-        self.bridge = try PhpBridge()
+        let iniPath = Bundle.module.path(forResource: "php", ofType: "ini")
+        self.bridge = PhpBridge(iniPath: iniPath)
     }
     
     /// Get the shared PHP engine instance

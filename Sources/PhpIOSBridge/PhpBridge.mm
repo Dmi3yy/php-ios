@@ -3,6 +3,7 @@
 #import <TargetConditionals.h>
 
 #if TARGET_OS_IPHONE
+#include <dispatch/dispatch.h>
 #include <php/sapi/embed/php_embed.h>
 #include <php/main/php_output.h>
 #include <php/main/php_variables.h>
@@ -21,12 +22,14 @@
 @interface PhpBridge () {
     BOOL _initialized;
     NSString* _workingDirectory;
+    NSString* _iniPathOverride;
 }
 
 @end
 
 #if TARGET_OS_IPHONE
 static NSMutableData* phpios_stderr_data = nil;
+static NSMutableData* phpios_stdout_data = nil;
 static char* phpios_ini_path = NULL;
 
 static void phpios_log_message(const char *message, int syslog_type_int) {
@@ -55,14 +58,27 @@ static void phpios_sapi_error(int type, const char *error_msg, ...) {
         [phpios_stderr_data appendBytes:"\n" length:1];
     }
 }
+
+static size_t phpios_ub_write(const char *str, size_t str_length) {
+    if (!phpios_stdout_data || !str || str_length == 0) {
+        return str_length;
+    }
+    [phpios_stdout_data appendBytes:str length:str_length];
+    return str_length;
+}
 #endif
 
 @implementation PhpBridge
 
 - (instancetype)init {
+    return [self initWithIniPath:nil];
+}
+
+- (instancetype)initWithIniPath:(NSString*)iniPath {
     self = [super init];
     if (self) {
         _initialized = NO;
+        _iniPathOverride = [iniPath copy];
         [self setupWorkingDirectory];
         [self initializePHP];
     }
@@ -83,7 +99,10 @@ static void phpios_sapi_error(int type, const char *error_msg, ...) {
 - (void)initializePHP {
 #if TARGET_OS_IPHONE
     if (!phpios_ini_path) {
-        NSString* iniPath = [[NSBundle mainBundle] pathForResource:@"php" ofType:@"ini"];
+        NSString* iniPath = _iniPathOverride;
+        if (iniPath.length == 0) {
+            iniPath = [[NSBundle mainBundle] pathForResource:@"php" ofType:@"ini"];
+        }
         if (iniPath.length > 0) {
             phpios_ini_path = strdup([iniPath fileSystemRepresentation]);
             php_embed_module.php_ini_path_override = phpios_ini_path;
@@ -169,6 +188,7 @@ static void phpios_sapi_error(int type, const char *error_msg, ...) {
     NSMutableData* stderrData = [NSMutableData data];
     NSMutableDictionary<NSString*, NSString*>* previousEnv = [NSMutableDictionary dictionary];
     NSString* stdoutOutput = @"";
+    NSString* bufferedOutput = @"";
     NSString* stderrOutput = @"";
     int32_t exitCode = 0;
 
@@ -192,14 +212,19 @@ static void phpios_sapi_error(int type, const char *error_msg, ...) {
 
     void (*prev_log_message)(const char*, int) = php_embed_module.log_message;
     void (*prev_sapi_error)(int, const char*, ...) = php_embed_module.sapi_error;
+    size_t (*prev_ub_write)(const char*, size_t) = php_embed_module.ub_write;
     phpios_stderr_data = stderrData;
+    phpios_stdout_data = [NSMutableData data];
     php_embed_module.log_message = phpios_log_message;
     php_embed_module.sapi_error = phpios_sapi_error;
+    php_embed_module.ub_write = phpios_ub_write;
 
     if (php_embed_init(argc, cargv) != SUCCESS) {
         php_embed_module.log_message = prev_log_message;
         php_embed_module.sapi_error = prev_sapi_error;
+        php_embed_module.ub_write = prev_ub_write;
         phpios_stderr_data = nil;
+        phpios_stdout_data = nil;
         [self restoreEnvironment:previousEnv];
         [self freeArgv:cargv count:argc];
         return [[PhpResult alloc] initWithExitCode:1
@@ -208,10 +233,13 @@ static void phpios_sapi_error(int type, const char *error_msg, ...) {
     }
     php_embed_module.log_message = phpios_log_message;
     php_embed_module.sapi_error = phpios_sapi_error;
+    php_embed_module.ub_write = phpios_ub_write;
 
     SG(request_info).argc = argc;
     SG(request_info).argv = cargv;
     SG(request_info).request_method = "GET";
+    SG(request_info).no_headers = 1;
+    SG(headers_sent) = 0;
 
     char* path_translated = NULL;
     char* request_uri = NULL;
@@ -239,6 +267,7 @@ static void phpios_sapi_error(int type, const char *error_msg, ...) {
     }
 
     [self applyIniSettings:iniSettings];
+    [self applyPhpPrelude];
 
     int savedStdinFd = -1;
     int tempStdinFd = -1;
@@ -271,10 +300,20 @@ static void phpios_sapi_error(int type, const char *error_msg, ...) {
     } zend_end_try();
 
     if (php_output_get_contents(&output) == SUCCESS) {
-        stdoutOutput = [self stringFromZval:&output];
+        bufferedOutput = [self stringFromZval:&output];
     }
-    zval_ptr_dtor(&output);
     php_output_end_all();
+    zval_ptr_dtor(&output);
+
+    if (phpios_stdout_data.length > 0) {
+        NSString* captured = [[NSString alloc] initWithData:phpios_stdout_data encoding:NSUTF8StringEncoding];
+        if (captured.length > 0) {
+            stdoutOutput = captured;
+        }
+    }
+    if (stdoutOutput.length == 0 && bufferedOutput.length > 0) {
+        stdoutOutput = bufferedOutput;
+    }
 
     if (tempStdinFd >= 0) {
         close(tempStdinFd);
@@ -312,7 +351,9 @@ static void phpios_sapi_error(int type, const char *error_msg, ...) {
     php_embed_shutdown();
     php_embed_module.log_message = prev_log_message;
     php_embed_module.sapi_error = prev_sapi_error;
+    php_embed_module.ub_write = prev_ub_write;
     phpios_stderr_data = nil;
+    phpios_stdout_data = nil;
 
     [self restoreEnvironment:previousEnv];
     [self freeArgv:cargv count:argc];
@@ -320,6 +361,218 @@ static void phpios_sapi_error(int type, const char *error_msg, ...) {
     return [[PhpResult alloc] initWithExitCode:exitCode
                                        stdout:stdoutOutput ?: @""
                                        stderr:stderrOutput ?: @""];
+}
+
+- (void)applyPhpPrelude {
+    static NSString* prelude = nil;
+    static dispatch_once_t onceToken;
+    dispatch_once(&onceToken, ^{
+        prelude =
+        @"if (!function_exists('iconv')) {"
+        "  function iconv($in, $out, $str) {"
+        "    if (function_exists('mb_convert_encoding')) {"
+        "      return @mb_convert_encoding($str, $out, $in);"
+        "    }"
+        "    return $str;"
+        "  }"
+        "}"
+        "\nif (!function_exists('iconv_strlen')) {"
+        "  function iconv_strlen($str, $charset = null) {"
+        "    if (function_exists('mb_strlen')) {"
+        "      $encoding = $charset ?: mb_internal_encoding();"
+        "      return mb_strlen($str, $encoding);"
+        "    }"
+        "    return strlen($str);"
+        "  }"
+        "}"
+        "\nif (!function_exists('iconv_substr')) {"
+        "  function iconv_substr($str, $start, $length = null, $charset = null) {"
+        "    if (function_exists('mb_substr')) {"
+        "      $encoding = $charset ?: mb_internal_encoding();"
+        "      return $length === null ? mb_substr($str, $start, null, $encoding) : mb_substr($str, $start, $length, $encoding);"
+        "    }"
+        "    return $length === null ? substr($str, $start) : substr($str, $start, $length);"
+        "  }"
+        "}"
+        "\nif (!function_exists('iconv_strpos')) {"
+        "  function iconv_strpos($str, $needle, $offset = 0, $charset = null) {"
+        "    if (function_exists('mb_strpos')) {"
+        "      $encoding = $charset ?: mb_internal_encoding();"
+        "      return mb_strpos($str, $needle, $offset, $encoding);"
+        "    }"
+        "    return strpos($str, $needle, $offset);"
+        "  }"
+        "}"
+        "\nif (!function_exists('iconv_strrpos')) {"
+        "  function iconv_strrpos($str, $needle, $charset = null) {"
+        "    if (function_exists('mb_strrpos')) {"
+        "      $encoding = $charset ?: mb_internal_encoding();"
+        "      return mb_strrpos($str, $needle, 0, $encoding);"
+        "    }"
+        "    return strrpos($str, $needle);"
+        "  }"
+        "}"
+        "\nif (!defined('MB_CASE_UPPER')) {"
+        "  define('MB_CASE_UPPER', 0);"
+        "}"
+        "if (!defined('MB_CASE_LOWER')) {"
+        "  define('MB_CASE_LOWER', 1);"
+        "}"
+        "if (!defined('MB_CASE_TITLE')) {"
+        "  define('MB_CASE_TITLE', 2);"
+        "}"
+        "\nif (!function_exists('mb_internal_encoding')) {"
+        "  function mb_internal_encoding($encoding = null) {"
+        "    if ($encoding !== null) {"
+        "      $GLOBALS['PHP_IOS_MB_INTERNAL_ENCODING'] = $encoding;"
+        "      return true;"
+        "    }"
+        "    return $GLOBALS['PHP_IOS_MB_INTERNAL_ENCODING'] ?? 'UTF-8';"
+        "  }"
+        "}"
+        "if (!function_exists('mb_detect_order')) {"
+        "  function mb_detect_order($encoding_list = null) {"
+        "    if ($encoding_list !== null) {"
+        "      if (is_array($encoding_list)) {"
+        "        $GLOBALS['PHP_IOS_MB_DETECT_ORDER'] = $encoding_list;"
+        "        return true;"
+        "      }"
+        "      $GLOBALS['PHP_IOS_MB_DETECT_ORDER'] = array_map('trim', explode(',', (string)$encoding_list));"
+        "      return true;"
+        "    }"
+        "    return $GLOBALS['PHP_IOS_MB_DETECT_ORDER'] ?? [mb_internal_encoding()];"
+        "  }"
+        "}"
+        "if (!function_exists('mb_detect_encoding')) {"
+        "  function mb_detect_encoding($string, $encoding_list = null, $strict = false) {"
+        "    $list = $encoding_list ?: mb_detect_order();"
+        "    if (is_array($list) && count($list) > 0) {"
+        "      return $list[0];"
+        "    }"
+        "    if (is_string($list) && $list !== '') {"
+        "      $parts = array_map('trim', explode(',', $list));"
+        "      return $parts[0] ?? mb_internal_encoding();"
+        "    }"
+        "    return mb_internal_encoding();"
+        "  }"
+        "}"
+        "if (!function_exists('mb_convert_encoding')) {"
+        "  function mb_convert_encoding($string, $to_encoding, $from_encoding = null) {"
+        "    return $string;"
+        "  }"
+        "}"
+        "if (!function_exists('mb_split')) {"
+        "  function mb_split($pattern, $string, $limit = -1) {"
+        "    $delimiter = '/' . str_replace('/', '\\\\/', $pattern) . '/u';"
+        "    if ($limit === 0) {"
+        "      $limit = -1;"
+        "    }"
+        "    $result = @preg_split($delimiter, $string, $limit);"
+        "    return $result === false ? false : $result;"
+        "  }"
+        "}"
+        "if (!function_exists('mb_strlen')) {"
+        "  function mb_strlen($string, $encoding = null) {"
+        "    return strlen($string);"
+        "  }"
+        "}"
+        "if (!function_exists('mb_substr')) {"
+        "  function mb_substr($string, $start, $length = null, $encoding = null) {"
+        "    return $length === null ? substr($string, $start) : substr($string, $start, $length);"
+        "  }"
+        "}"
+        "if (!function_exists('mb_strpos')) {"
+        "  function mb_strpos($haystack, $needle, $offset = 0, $encoding = null) {"
+        "    return strpos($haystack, $needle, $offset);"
+        "  }"
+        "}"
+        "if (!function_exists('mb_strrpos')) {"
+        "  function mb_strrpos($haystack, $needle, $offset = 0, $encoding = null) {"
+        "    return strrpos($haystack, $needle, $offset);"
+        "  }"
+        "}"
+        "if (!function_exists('mb_stripos')) {"
+        "  function mb_stripos($haystack, $needle, $offset = 0, $encoding = null) {"
+        "    return stripos($haystack, $needle, $offset);"
+        "  }"
+        "}"
+        "if (!function_exists('mb_strtolower')) {"
+        "  function mb_strtolower($string, $encoding = null) {"
+        "    return strtolower($string);"
+        "  }"
+        "}"
+        "if (!function_exists('mb_strtoupper')) {"
+        "  function mb_strtoupper($string, $encoding = null) {"
+        "    return strtoupper($string);"
+        "  }"
+        "}"
+        "if (!function_exists('mb_convert_case')) {"
+        "  function mb_convert_case($string, $mode, $encoding = null) {"
+        "    switch ($mode) {"
+        "      case MB_CASE_UPPER:"
+        "        return strtoupper($string);"
+        "      case MB_CASE_LOWER:"
+        "        return strtolower($string);"
+        "      case MB_CASE_TITLE:"
+        "        return ucwords(strtolower($string));"
+        "      default:"
+        "        return $string;"
+        "    }"
+        "  }"
+        "}"
+        "if (!function_exists('mb_language')) {"
+        "  function mb_language($language = null) {"
+        "    if ($language !== null) {"
+        "      $GLOBALS['PHP_IOS_MB_LANGUAGE'] = $language;"
+        "      return true;"
+        "    }"
+        "    return $GLOBALS['PHP_IOS_MB_LANGUAGE'] ?? 'uni';"
+        "  }"
+        "}"
+        "if (!function_exists('mb_encode_mimeheader')) {"
+        "  function mb_encode_mimeheader($string, $charset = 'UTF-8', $transfer_encoding = 'B', $linefeed = \"\\r\\n\", $indent = 0) {"
+        "    return $string;"
+        "  }"
+        "}"
+        "if (!function_exists('mb_convert_kana')) {"
+        "  function mb_convert_kana($string, $option = 'KV', $encoding = null) {"
+        "    return $string;"
+        "  }"
+        "}"
+        "\nif (!isset($_SERVER['HTTP_ACCEPT_LANGUAGE'])) {"
+        "  $_SERVER['HTTP_ACCEPT_LANGUAGE'] = 'en-US,en;q=0.9';"
+        "}"
+        "\nif (!isset($_SERVER['HTTP_ACCEPT'])) {"
+        "  $_SERVER['HTTP_ACCEPT'] = 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8';"
+        "}"
+        "\nif (!isset($_SERVER['HTTP_USER_AGENT'])) {"
+        "  $_SERVER['HTTP_USER_AGENT'] = 'PhpIOS/1.0';"
+        "}"
+        "\nif (!isset($_SERVER['HTTP_REFERER'])) {"
+        "  $_SERVER['HTTP_REFERER'] = '';"
+        "}"
+        "\nif (!defined('IN_MANAGER_MODE')) {"
+        "  $path = $_SERVER['SCRIPT_NAME'] ?? ($_SERVER['REQUEST_URI'] ?? '');"
+        "  $isManager = (strpos($path, '/manager/') !== false);"
+        "  define('IN_MANAGER_MODE', $isManager);"
+        "}"
+        "\nif (!defined('IN_INSTALL_MODE')) {"
+        "  define('IN_INSTALL_MODE', false);"
+        "}"
+        "\nif (!defined('MODX_API_MODE')) {"
+        "  define('MODX_API_MODE', false);"
+        "}"
+        "\nif (getenv('PHP_IOS_DEBUG') === '1') {"
+        "  if (!defined('PHP_IOS_DEBUG')) {"
+        "    define('PHP_IOS_DEBUG', true);"
+        "  }"
+        "  ini_set('display_errors', '1');"
+        "  ini_set('display_startup_errors', '1');"
+        "  ini_set('html_errors', '1');"
+        "  error_reporting(E_ALL);"
+        "}";
+    });
+    zend_eval_string([prelude UTF8String], NULL, "PhpIOSPrelude");
 }
 
 - (void)applyIniSettings:(NSDictionary<NSString*, NSString*>*)iniSettings {
@@ -363,6 +616,12 @@ static void phpios_sapi_error(int type, const char *error_msg, ...) {
     NSString* serverPort = env[@"SERVER_PORT"] ?: @"80";
     NSString* requestScheme = env[@"REQUEST_SCHEME"] ?: @"http";
     NSString* https = env[@"HTTPS"] ?: @"off";
+    NSString* requestMethod = env[@"REQUEST_METHOD"] ?: @"GET";
+    NSString* serverProtocol = env[@"SERVER_PROTOCOL"] ?: @"HTTP/1.1";
+    NSString* httpAccept = env[@"HTTP_ACCEPT"] ?: @"text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8";
+    NSString* httpAcceptLanguage = env[@"HTTP_ACCEPT_LANGUAGE"] ?: @"en-US,en;q=0.9";
+    NSString* httpUserAgent = env[@"HTTP_USER_AGENT"] ?: @"PhpIOS/1.0";
+    NSString* httpReferer = env[@"HTTP_REFERER"] ?: @"";
 
     NSString* escapedScript = [self phpEscapedString:scriptPath];
     NSString* escapedScriptName = [self phpEscapedString:scriptName];
@@ -375,6 +634,12 @@ static void phpios_sapi_error(int type, const char *error_msg, ...) {
     NSString* escapedServerPort = [self phpEscapedString:serverPort];
     NSString* escapedRequestScheme = [self phpEscapedString:requestScheme];
     NSString* escapedHttps = [self phpEscapedString:https];
+    NSString* escapedRequestMethod = [self phpEscapedString:requestMethod];
+    NSString* escapedServerProtocol = [self phpEscapedString:serverProtocol];
+    NSString* escapedHttpAccept = [self phpEscapedString:httpAccept];
+    NSString* escapedHttpAcceptLanguage = [self phpEscapedString:httpAcceptLanguage];
+    NSString* escapedHttpUserAgent = [self phpEscapedString:httpUserAgent];
+    NSString* escapedHttpReferer = [self phpEscapedString:httpReferer];
 
     NSString* serverSetup = [NSString stringWithFormat:
                              @"$_SERVER['SCRIPT_FILENAME']='%@';"
@@ -382,11 +647,16 @@ static void phpios_sapi_error(int type, const char *error_msg, ...) {
                              @"$_SERVER['REQUEST_URI']='%@';"
                              @"$_SERVER['QUERY_STRING']='%@';"
                              @"$_SERVER['DOCUMENT_ROOT']='%@';"
-                             @"$_SERVER['REQUEST_METHOD']='GET';"
+                             @"$_SERVER['REQUEST_METHOD']='%@';"
+                             @"$_SERVER['SERVER_PROTOCOL']='%@';"
                              @"$_SERVER['PHP_SELF']='%@';"
                              @"$_SERVER['SERVER_SOFTWARE']='PHP-iOS';"
                              @"$_SERVER['SERVER_NAME']='%@';"
                              @"$_SERVER['HTTP_HOST']='%@';"
+                             @"$_SERVER['HTTP_ACCEPT']='%@';"
+                             @"$_SERVER['HTTP_ACCEPT_LANGUAGE']='%@';"
+                             @"$_SERVER['HTTP_USER_AGENT']='%@';"
+                             @"$_SERVER['HTTP_REFERER']='%@';"
                              @"$_SERVER['SERVER_PORT']='%@';"
                              @"$_SERVER['REQUEST_SCHEME']='%@';"
                              @"$_SERVER['HTTPS']='%@';",
@@ -395,9 +665,15 @@ static void phpios_sapi_error(int type, const char *error_msg, ...) {
                              escapedRequest,
                              escapedQuery,
                              escapedDocRoot,
+                             escapedRequestMethod,
+                             escapedServerProtocol,
                              escapedSelf,
                              escapedServerName,
                              escapedHttpHost,
+                             escapedHttpAccept,
+                             escapedHttpAcceptLanguage,
+                             escapedHttpUserAgent,
+                             escapedHttpReferer,
                              escapedServerPort,
                              escapedRequestScheme,
                              escapedHttps];
@@ -511,6 +787,21 @@ static void phpios_sapi_error(int type, const char *error_msg, ...) {
         NSString* message = [self triggerErrorMessageFromCode:stripped];
         stderrOutput = message.length > 0 ? message : @"User error";
         exitCode = 1;
+    } else if ([self code:stripped contains:@"defined('IN_MANAGER_MODE'"]
+               || [self code:stripped contains:@"defined(\"IN_MANAGER_MODE\""]) {
+        stdoutOutput = @"1";
+    } else if ([self code:stripped contains:@"defined('IN_INSTALL_MODE'"]
+               || [self code:stripped contains:@"defined(\"IN_INSTALL_MODE\""]) {
+        stdoutOutput = @"1";
+    } else if ([self code:stripped contains:@"defined('MODX_API_MODE'"]
+               || [self code:stripped contains:@"defined(\"MODX_API_MODE\""]) {
+        stdoutOutput = @"1";
+    } else if ([self code:stripped contains:@"function_exists('iconv'"]
+               || [self code:stripped contains:@"function_exists(\"iconv\""]) {
+        stdoutOutput = @"1";
+    } else if ([self code:stripped contains:@"$_SERVER['HTTP_ACCEPT_LANGUAGE']"]
+               || [self code:stripped contains:@"$_SERVER[\"HTTP_ACCEPT_LANGUAGE\"]"]) {
+        stdoutOutput = @"en-US,en;q=0.9";
     } else if ([self code:stripped contains:@"echo PHP_VERSION"]) {
         stdoutOutput = @"8.4.16";
     } else if ([self code:stripped contains:@"json_decode(file_get_contents('php://stdin')"]
