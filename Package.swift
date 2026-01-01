@@ -33,7 +33,23 @@ let package = Package(
             path: "Sources/PhpIOSBridge",
             exclude: ["../PhpIOS/lib", "../PhpIOS/lib-sim"],
             publicHeadersPath: ".",
+            cSettings: [
+                .unsafeFlags(["-I", "\(phpLibDir)/include/php/Zend"], .when(platforms: [.iOS])),
+                .unsafeFlags(["-I", "\(phpLibDir)/include/php/TSRM"], .when(platforms: [.iOS])),
+                .unsafeFlags(["-I", "\(phpLibDir)/include/php/main"], .when(platforms: [.iOS])),
+                .unsafeFlags(["-I", "\(phpLibDir)/include/php"], .when(platforms: [.iOS])),
+                .unsafeFlags(["-I", "\(phpLibDir)/include"], .when(platforms: [.iOS]))
+            ],
+            cxxSettings: [
+                .unsafeFlags(["-I", "\(phpLibDir)/include/php/Zend"], .when(platforms: [.iOS])),
+                .unsafeFlags(["-I", "\(phpLibDir)/include/php/TSRM"], .when(platforms: [.iOS])),
+                .unsafeFlags(["-I", "\(phpLibDir)/include/php/main"], .when(platforms: [.iOS])),
+                .unsafeFlags(["-I", "\(phpLibDir)/include/php"], .when(platforms: [.iOS])),
+                .unsafeFlags(["-I", "\(phpLibDir)/include"], .when(platforms: [.iOS]))
+            ],
             linkerSettings: [
+                .linkedLibrary("resolv", .when(platforms: [.iOS])),
+                .linkedLibrary("xml2", .when(platforms: [.iOS])),
                 .linkedLibrary("php-ios", .when(platforms: [.iOS])),
                 .unsafeFlags(["-L", phpLibDir], .when(platforms: [.iOS])),
                 .unsafeFlags(["-Xlinker", "-ObjC"], .when(platforms: [.iOS]))
