@@ -195,7 +195,7 @@ This repo includes:
 
 ```
 /Toolchain/
-  build-php.sh        # cross-compiles PHP 8.3 static for arm64-apple-ios
+  build-php.sh        # cross-compiles PHP 8.4 static for arm64-apple-ios
   sdk/                # minimal headers/libs for iOS
   patches/            # small portability tweaks (iconv, dlopen stubs)
  /Sources/PhpIOS/
@@ -209,7 +209,7 @@ To rebuild:
 
 ```bash
 cd Toolchain
-./build-php.sh --php=8.3.10 --extensions="json,mbstring,xml,dom,zip" --min-ios=16.0
+./build-php.sh --php=8.4.16 --extensions="json,mbstring,xml,dom,zip" --min-ios=16.0
 ```
 
 Outputs `libphp-ios.a` and headers placed under `Sources/PhpIOS/lib/`.

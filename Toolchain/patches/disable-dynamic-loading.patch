@@ -1,15 +1,101 @@
---- a/Zend/zend_dl.c
-+++ b/Zend/zend_dl.c
-@@ -1,5 +1,7 @@
- #include "zend.h"
+--- a/ext/standard/dl.c
++++ b/ext/standard/dl.c
+@@ -24,7 +24,11 @@
  
-+/* Disable dynamic loading on iOS */
-+#if 0
- #ifdef HAVE_DLOPEN
- # include <dlfcn.h>
- #endif
-@@ -50,3 +52,4 @@ ZEND_API void *zend_dlopen(const char *filename)
- 	return dlopen(filename, RTLD_LAZY);
- }
- #endif
+ #include "SAPI.h"
+ 
+-#ifdef HAVE_LIBDL
++#if defined(__IPHONE_OS_VERSION_MIN_REQUIRED)
++#define PHP_IOS_DISABLE_DL 1
 +#endif
++
++#if defined(HAVE_LIBDL) && !defined(PHP_IOS_DISABLE_DL)
+ #include <stdlib.h>
+ #include <stdio.h>
+ #include <string.h>
+@@ -77,7 +81,7 @@
+ }
+ /* }}} */
+ 
+-#ifdef HAVE_LIBDL
++#if defined(HAVE_LIBDL) && !defined(PHP_IOS_DISABLE_DL)
+ 
+ /* {{{ php_load_shlib */
+ PHPAPI void *php_load_shlib(const char *path, char **errp)
+@@ -291,7 +295,7 @@
+ 
+ PHP_MINFO_FUNCTION(dl)
+ {
+-#if defined(HAVE_LIBDL)
++#if defined(HAVE_LIBDL) && !defined(PHP_IOS_DISABLE_DL)
+ #define PHP_DL_SUPPORT_STATUS "enabled"
+ #else
+ #define PHP_DL_SUPPORT_STATUS "unavailable"
+
+--- a/Zend/zend_extensions.c
++++ b/Zend/zend_extensions.c
+@@ -20,6 +20,10 @@
+ #include "zend_extensions.h"
+ #include "zend_system_id.h"
+ 
++#if defined(__IPHONE_OS_VERSION_MIN_REQUIRED)
++#define PHP_IOS_DISABLE_DL 1
++#endif
++
+ ZEND_API zend_llist zend_extensions;
+ ZEND_API uint32_t zend_extension_flags = 0;
+ ZEND_API int zend_op_array_extension_handles = 0;
+@@ -28,7 +32,7 @@
+ 
+ zend_result zend_load_extension(const char *path)
+ {
+-#if ZEND_EXTENSIONS_SUPPORT
++#if ZEND_EXTENSIONS_SUPPORT && !defined(PHP_IOS_DISABLE_DL)
+ 	DL_HANDLE handle;
+ 
+ 	handle = DL_LOAD(path);
+@@ -62,7 +66,7 @@
+ 
+ zend_result zend_load_extension_handle(DL_HANDLE handle, const char *path)
+ {
+-#if ZEND_EXTENSIONS_SUPPORT
++#if ZEND_EXTENSIONS_SUPPORT && !defined(PHP_IOS_DISABLE_DL)
+ 	zend_extension *new_extension;
+ 
+ 	const zend_extension_version_info *extension_version_info = (const zend_extension_version_info *) DL_FETCH_SYMBOL(handle, "extension_version_info");
+@@ -149,7 +153,7 @@
+ 
+ void zend_register_extension(zend_extension *new_extension, DL_HANDLE handle)
+ {
+-#if ZEND_EXTENSIONS_SUPPORT
++#if ZEND_EXTENSIONS_SUPPORT && !defined(PHP_IOS_DISABLE_DL)
+ 	zend_extension extension;
+ 
+ 	extension = *new_extension;
+@@ -181,7 +185,7 @@
+ 
+ static void zend_extension_shutdown(zend_extension *extension)
+ {
+-#if ZEND_EXTENSIONS_SUPPORT
++#if ZEND_EXTENSIONS_SUPPORT && !defined(PHP_IOS_DISABLE_DL)
+ 	if (extension->shutdown) {
+ 		extension->shutdown(extension);
+ 	}
+@@ -191,7 +195,7 @@
+ /* int return due to zend linked list API */
+ static int zend_extension_startup(zend_extension *extension)
+ {
+-#if ZEND_EXTENSIONS_SUPPORT
++#if ZEND_EXTENSIONS_SUPPORT && !defined(PHP_IOS_DISABLE_DL)
+ 	if (extension->startup) {
+ 		if (extension->startup(extension)!=SUCCESS) {
+ 			return 1;
+@@ -228,7 +232,7 @@
+ 
+ void zend_extension_dtor(zend_extension *extension)
+ {
+-#if ZEND_EXTENSIONS_SUPPORT && !ZEND_DEBUG
++#if ZEND_EXTENSIONS_SUPPORT && !defined(PHP_IOS_DISABLE_DL) && !ZEND_DEBUG
+ 	if (extension->handle && !getenv("ZEND_DONT_UNLOAD_MODULES")) {
+ 		DL_UNLOAD(extension->handle);
+ 	}

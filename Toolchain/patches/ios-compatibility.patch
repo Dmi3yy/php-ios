@@ -1,12 +1,54 @@
 --- a/main/php.h
 +++ b/main/php.h
-@@ -1,5 +1,9 @@
- #ifndef PHP_H
- #define PHP_H
+@@ -29,6 +29,18 @@
+ 
+ #include "php_version.h"
+ #include "zend.h"
 +
 +/* iOS compatibility fixes */
-+#define HAVE_DLOPEN 0
-+#define HAVE_DLFCN_H 0
++#if defined(__IPHONE_OS_VERSION_MIN_REQUIRED)
++# ifdef HAVE_DLOPEN
++#  undef HAVE_DLOPEN
++# endif
++# define HAVE_DLOPEN 0
++# ifdef HAVE_DLFCN_H
++#  undef HAVE_DLFCN_H
++# endif
++# define HAVE_DLFCN_H 0
++#endif
+ #include "zend_sort.h"
+ #include "php_compat.h"
  
- #ifdef PHP_WIN32
- # include "config.w32.h"
+
+--- a/ext/pcre/pcre2lib/sljit/allocator_src/sljitExecAllocatorApple.c
++++ b/ext/pcre/pcre2lib/sljit/allocator_src/sljitExecAllocatorApple.c
+@@ -109,6 +109,10 @@
+ #define SLJIT_MAP_JIT	(0)
+ #endif
+ 
++#ifndef SLJIT_UPDATE_WX_FLAGS
++#define SLJIT_UPDATE_WX_FLAGS(from, to, enable_exec)
++#endif
++
+ #endif /* TARGET_OS_OSX */
+ 
+ static SLJIT_INLINE void* alloc_chunk(sljit_uw size)
+
+--- a/ext/standard/proc_open.c
++++ b/ext/standard/proc_open.c
+@@ -1393,10 +1393,15 @@
+ 	}
+ 
+ 	if (cwd) {
++#if defined(__IPHONE_OS_VERSION_MIN_REQUIRED)
++		php_error_docref(NULL, E_WARNING, "posix_spawn_file_actions_addchdir_np() is unavailable on iOS; ignoring cwd");
++		r = 0;
++#else
+ 		r = posix_spawn_file_actions_addchdir_np(&factions, cwd);
+ 		if (r != 0) {
+ 			php_error_docref(NULL, E_WARNING, "posix_spawn_file_actions_addchdir_np() failed: %s", strerror(r));
+ 		}
++#endif
+ 	}
+ 
+ 	if (argv) {

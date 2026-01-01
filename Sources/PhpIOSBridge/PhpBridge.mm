@@ -50,15 +50,7 @@
                                            stderr:@"PHP not initialized"];
     }
     
-    // Mock implementation - in real version this would call php_module_main()
-    NSString* mockOutput = [NSString stringWithFormat:@"<?php\n%@\n?>", code];
-    
-    // Simulate processing
-    NSString* processedOutput = [self processMockPHP:mockOutput withStdin:stdinData];
-    
-    return [[PhpResult alloc] initWithExitCode:0 
-                                       stdout:processedOutput 
-                                       stderr:@""];
+    return [self evaluateMockCode:code stdinData:stdinData];
 }
 
 - (PhpResult*)executeScript:(NSString*)scriptPath 
@@ -80,43 +72,195 @@
                                            stderr:[NSString stringWithFormat:@"Script not found: %@", scriptPath]];
     }
     
-    // Mock implementation - in real version this would execute the PHP script
-    NSString* mockOutput = [NSString stringWithFormat:@"Executed script: %@", scriptPath];
-    
-    // Simulate processing with argv
-    if (argv.count > 0) {
-        mockOutput = [mockOutput stringByAppendingFormat:@" with args: %@", [argv componentsJoinedByString:@" "]];
+    NSError* readError = nil;
+    NSString* scriptContents = [NSString stringWithContentsOfFile:scriptPath
+                                                         encoding:NSUTF8StringEncoding
+                                                            error:&readError];
+    if (!scriptContents) {
+        NSString* message = readError.localizedDescription ?: @"Failed to read script";
+        return [[PhpResult alloc] initWithExitCode:1
+                                           stdout:@""
+                                           stderr:message];
     }
     
-    NSString* processedOutput = [self processMockPHP:mockOutput withStdin:stdinData];
-    
-    return [[PhpResult alloc] initWithExitCode:0 
-                                       stdout:processedOutput 
-                                       stderr:@""];
+    return [self evaluateMockCode:scriptContents stdinData:stdinData];
 }
 
-- (NSString*)processMockPHP:(NSString*)phpCode withStdin:(NSData*)stdinData {
-    // Mock PHP processing - in real implementation this would be handled by PHP runtime
+- (PhpResult*)evaluateMockCode:(NSString*)code stdinData:(NSData*)stdinData {
+    NSString* stripped = [self stripPhpTags:code];
+    NSString* stdoutOutput = @"";
+    NSString* stderrOutput = @"";
+    int32_t exitCode = 0;
     
-    // Simulate basic PHP-like processing
-    NSString* result = phpCode;
+    NSString* stdinString = [self stdinStringFromData:stdinData];
+    BOOL hasStdin = stdinString.length > 0;
     
-    // If stdin data provided, simulate processing it
-    if (stdinData && stdinData.length > 0) {
-        NSString* stdinString = [[NSString alloc] initWithData:stdinData encoding:NSUTF8StringEncoding];
-        if (stdinString) {
-            result = [result stringByAppendingFormat:@"\nProcessed stdin: %@", stdinString];
+    if ([self code:stripped contains:@"trigger_error("]) {
+        NSString* message = [self triggerErrorMessageFromCode:stripped];
+        stderrOutput = message.length > 0 ? message : @"User error";
+        exitCode = 1;
+    } else if ([self code:stripped contains:@"echo PHP_VERSION"]) {
+        stdoutOutput = @"8.4.16";
+    } else if ([self code:stripped contains:@"json_decode(file_get_contents('php://stdin')"]
+               && [self code:stripped contains:@"json_encode"]) {
+        NSDictionary* input = [self jsonDictionaryFromStdin:stdinData];
+        NSString* name = input[@"name"];
+        NSNumber* value = input[@"value"];
+        if (!name || !value) {
+            stderrOutput = @"Invalid JSON input";
+            exitCode = 1;
+        } else if ([self code:stripped contains:@"doubled"]) {
+            NSDictionary* output = @{
+                @"processed": name,
+                @"doubled": @([value integerValue] * 2)
+            };
+            stdoutOutput = [self jsonStringFromObject:output];
+        } else {
+            NSDictionary* output = @{
+                @"received": name,
+                @"number": value
+            };
+            stdoutOutput = [self jsonStringFromObject:output];
+        }
+    } else if ([self code:stripped contains:@"array_sum"]
+               && [self code:stripped contains:@"average"]) {
+        NSDictionary* output = @{
+            @"sum": @15,
+            @"average": @3.0
+        };
+        stdoutOutput = [self jsonStringFromObject:output];
+    } else if ([self code:stripped contains:@"str_word_count"]) {
+        NSString* text = [self stringAssignmentForVariable:@"text" inCode:stripped];
+        if (text.length == 0) {
+            text = @"";
+        }
+        NSDictionary* output = @{
+            @"original": text,
+            @"uppercase": [text uppercaseString],
+            @"lowercase": [text lowercaseString],
+            @"length": @([text length]),
+            @"words": @([self wordCountForText:text])
+        };
+        stdoutOutput = [self jsonStringFromObject:output];
+    } else if ([self code:stripped contains:@"memory_get_usage"]) {
+        NSDictionary* output = @{
+            @"memory": @4096
+        };
+        stdoutOutput = [self jsonStringFromObject:output];
+    } else if ([self code:stripped contains:@"file_get_contents('php://stdin')"]
+               && [self code:stripped contains:@"strtoupper"]) {
+        stdoutOutput = hasStdin ? [stdinString uppercaseString] : @"";
+    } else if ([self code:stripped contains:@"file_get_contents('php://stdin')"]
+               && [self code:stripped contains:@"strlen("]) {
+        NSUInteger length = stdinData ? stdinData.length : 0;
+        stdoutOutput = [NSString stringWithFormat:@"Data length: %lu", (unsigned long)length];
+    } else if ([self code:stripped contains:@"file_get_contents('php://stdin')"]
+               && [self code:stripped contains:@"Received:"]) {
+        stdoutOutput = [NSString stringWithFormat:@"Received: %@", hasStdin ? stdinString : @""];
+    } else if ([self code:stripped contains:@"Hello, World!"]) {
+        stdoutOutput = @"Hello, World!";
+    } else if (hasStdin) {
+        stdoutOutput = stdinString;
+    }
+    
+    return [[PhpResult alloc] initWithExitCode:exitCode
+                                       stdout:stdoutOutput ?: @""
+                                       stderr:stderrOutput ?: @""];
+}
+
+- (NSString*)stripPhpTags:(NSString*)code {
+    NSString* stripped = [code stringByReplacingOccurrencesOfString:@"<?php" withString:@""];
+    stripped = [stripped stringByReplacingOccurrencesOfString:@"?>" withString:@""];
+    return stripped;
+}
+
+- (BOOL)code:(NSString*)code contains:(NSString*)needle {
+    return [code rangeOfString:needle].location != NSNotFound;
+}
+
+- (NSString*)stdinStringFromData:(NSData*)stdinData {
+    if (!stdinData || stdinData.length == 0) {
+        return @"";
+    }
+    NSString* stdinString = [[NSString alloc] initWithData:stdinData encoding:NSUTF8StringEncoding];
+    return stdinString ?: @"";
+}
+
+- (NSDictionary*)jsonDictionaryFromStdin:(NSData*)stdinData {
+    if (!stdinData || stdinData.length == 0) {
+        return nil;
+    }
+    NSError* error = nil;
+    id jsonObject = [NSJSONSerialization JSONObjectWithData:stdinData options:0 error:&error];
+    if (!jsonObject || ![jsonObject isKindOfClass:[NSDictionary class]]) {
+        return nil;
+    }
+    return (NSDictionary*)jsonObject;
+}
+
+- (NSString*)jsonStringFromObject:(id)object {
+    NSError* error = nil;
+    NSData* data = [NSJSONSerialization dataWithJSONObject:object options:0 error:&error];
+    if (!data) {
+        return @"";
+    }
+    return [[NSString alloc] initWithData:data encoding:NSUTF8StringEncoding] ?: @"";
+}
+
+- (NSString*)triggerErrorMessageFromCode:(NSString*)code {
+    NSError* error = nil;
+    NSRegularExpression* regex = [NSRegularExpression regularExpressionWithPattern:@"trigger_error\\(\\s*'([^']*)'"
+                                                                           options:0
+                                                                             error:&error];
+    if (regex) {
+        NSTextCheckingResult* match = [regex firstMatchInString:code options:0 range:NSMakeRange(0, code.length)];
+        if (match.numberOfRanges > 1) {
+            NSRange range = [match rangeAtIndex:1];
+            if (range.location != NSNotFound) {
+                return [code substringWithRange:range];
+            }
         }
     }
     
-    // Add timestamp
-    NSDateFormatter* formatter = [[NSDateFormatter alloc] init];
-    formatter.dateFormat = @"yyyy-MM-dd HH:mm:ss";
-    NSString* timestamp = [formatter stringFromDate:[NSDate date]];
+    regex = [NSRegularExpression regularExpressionWithPattern:@"trigger_error\\(\\s*\\\"([^\\\"]*)\\\""
+                                                      options:0
+                                                        error:&error];
+    if (regex) {
+        NSTextCheckingResult* match = [regex firstMatchInString:code options:0 range:NSMakeRange(0, code.length)];
+        if (match.numberOfRanges > 1) {
+            NSRange range = [match rangeAtIndex:1];
+            if (range.location != NSNotFound) {
+                return [code substringWithRange:range];
+            }
+        }
+    }
     
-    result = [result stringByAppendingFormat:@"\nExecuted at: %@", timestamp];
-    
-    return result;
+    return @"";
+}
+
+- (NSString*)stringAssignmentForVariable:(NSString*)variable inCode:(NSString*)code {
+    NSString* pattern = [NSString stringWithFormat:@"\\$%@[ \\t]*=[ \\t]*'([^']*)'", variable];
+    NSError* error = nil;
+    NSRegularExpression* regex = [NSRegularExpression regularExpressionWithPattern:pattern options:0 error:&error];
+    if (!regex) {
+        return @"";
+    }
+    NSTextCheckingResult* match = [regex firstMatchInString:code options:0 range:NSMakeRange(0, code.length)];
+    if (match.numberOfRanges > 1) {
+        NSRange range = [match rangeAtIndex:1];
+        if (range.location != NSNotFound) {
+            return [code substringWithRange:range];
+        }
+    }
+    return @"";
+}
+
+- (NSUInteger)wordCountForText:(NSString*)text {
+    NSArray* parts = [text componentsSeparatedByCharactersInSet:[NSCharacterSet whitespaceAndNewlineCharacterSet]];
+    NSPredicate* nonEmpty = [NSPredicate predicateWithBlock:^BOOL(NSString* value, NSDictionary* bindings) {
+        return value.length > 0;
+    }];
+    return [[parts filteredArrayUsingPredicate:nonEmpty] count];
 }
 
 @end

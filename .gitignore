@@ -355,3 +355,5 @@ fastlane/test_output
 
 # Custom project specific
 # Add any project-specific patterns here
+/Toolchain/sdk/include/
+/Toolchain/php-*/
