@@ -42,10 +42,18 @@ NS_ASSUME_NONNULL_BEGIN
 @property (nonatomic, readonly) int32_t exitCode;
 @property (nonatomic, readonly) NSString* stdoutOutput;
 @property (nonatomic, readonly) NSString* stderrOutput;
+@property (nonatomic, readonly) NSDictionary<NSString*, NSArray<NSString*>*>* responseHeaders;
+@property (nonatomic, readonly) int32_t statusCode;
 
 - (instancetype)initWithExitCode:(int32_t)exitCode 
                           stdout:(NSString*)stdoutOutput 
                           stderr:(NSString*)stderrOutput;
+
+- (instancetype)initWithExitCode:(int32_t)exitCode
+                          stdout:(NSString*)stdoutOutput
+                          stderr:(NSString*)stderrOutput
+                 responseHeaders:(NSDictionary<NSString*, NSArray<NSString*>*>*)responseHeaders
+                      statusCode:(int32_t)statusCode;
 
 @end
 

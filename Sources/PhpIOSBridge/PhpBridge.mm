@@ -9,6 +9,7 @@
 #include <php/main/php_variables.h>
 #include <php/main/php_ini.h>
 #include <php/main/php_globals.h>
+#include <php/main/SAPI.h>
 #include <php/Zend/zend_ini.h>
 #include <php/Zend/zend_API.h>
 #include <php/Zend/zend_exceptions.h>
@@ -23,28 +24,45 @@
     BOOL _initialized;
     NSString* _workingDirectory;
     NSString* _iniPathOverride;
+    dispatch_queue_t _phpQueue;
 }
 
 @end
 
 #if TARGET_OS_IPHONE
-static NSMutableData* phpios_stderr_data = nil;
-static NSMutableData* phpios_stdout_data = nil;
 static char* phpios_ini_path = NULL;
+static const void* phpios_queue_key = &phpios_queue_key;
+static NSString* const kPhpIOSStdoutKey = @"phpios.stdout";
+static NSString* const kPhpIOSStderrKey = @"phpios.stderr";
+
+static void phpios_set_thread_data(NSString* key, NSMutableData* data) {
+    NSMutableDictionary* dict = [NSThread currentThread].threadDictionary;
+    if (data) {
+        dict[key] = data;
+    } else {
+        [dict removeObjectForKey:key];
+    }
+}
+
+static NSMutableData* phpios_get_thread_data(NSString* key) {
+    return [NSThread currentThread].threadDictionary[key];
+}
 
 static void phpios_log_message(const char *message, int syslog_type_int) {
-    if (!phpios_stderr_data || !message) {
+    NSMutableData* stderrData = phpios_get_thread_data(kPhpIOSStderrKey);
+    if (!stderrData || !message) {
         return;
     }
     size_t length = strlen(message);
     if (length > 0) {
-        [phpios_stderr_data appendBytes:message length:length];
-        [phpios_stderr_data appendBytes:"\n" length:1];
+        [stderrData appendBytes:message length:length];
+        [stderrData appendBytes:"\n" length:1];
     }
 }
 
 static void phpios_sapi_error(int type, const char *error_msg, ...) {
-    if (!phpios_stderr_data || !error_msg) {
+    NSMutableData* stderrData = phpios_get_thread_data(kPhpIOSStderrKey);
+    if (!stderrData || !error_msg) {
         return;
     }
     char buffer[2048];
@@ -54,17 +72,29 @@ static void phpios_sapi_error(int type, const char *error_msg, ...) {
     va_end(args);
     size_t length = strlen(buffer);
     if (length > 0) {
-        [phpios_stderr_data appendBytes:buffer length:length];
-        [phpios_stderr_data appendBytes:"\n" length:1];
+        [stderrData appendBytes:buffer length:length];
+        [stderrData appendBytes:"\n" length:1];
     }
 }
 
 static size_t phpios_ub_write(const char *str, size_t str_length) {
-    if (!phpios_stdout_data || !str || str_length == 0) {
+    NSMutableData* stdoutData = phpios_get_thread_data(kPhpIOSStdoutKey);
+    if (!stdoutData || !str || str_length == 0) {
         return str_length;
     }
-    [phpios_stdout_data appendBytes:str length:str_length];
+    [stdoutData appendBytes:str length:str_length];
     return str_length;
+}
+
+static void phpios_register_server_var(zval* server, const char* key, NSString* value) {
+    if (!server || !key || !value) {
+        return;
+    }
+    NSData* data = [value dataUsingEncoding:NSUTF8StringEncoding];
+    if (!data) {
+        return;
+    }
+    php_register_variable_safe(key, (char*)data.bytes, (int)data.length, server);
 }
 #endif
 
@@ -79,6 +109,10 @@ static size_t phpios_ub_write(const char *str, size_t str_length) {
     if (self) {
         _initialized = NO;
         _iniPathOverride = [iniPath copy];
+        _phpQueue = dispatch_queue_create("phpios.bridge", DISPATCH_QUEUE_SERIAL);
+#if TARGET_OS_IPHONE
+        dispatch_queue_set_specific(_phpQueue, phpios_queue_key, (void*)phpios_queue_key, NULL);
+#endif
         [self setupWorkingDirectory];
         [self initializePHP];
     }
@@ -114,6 +148,21 @@ static size_t phpios_ub_write(const char *str, size_t str_length) {
 #endif
 }
 
+- (PhpResult*)executeOnPhpQueue:(PhpResult* (^)(void))block {
+#if TARGET_OS_IPHONE
+    if (dispatch_get_specific(phpios_queue_key)) {
+        return block();
+    }
+    __block PhpResult* result = nil;
+    dispatch_sync(_phpQueue, ^{
+        result = block();
+    });
+    return result;
+#else
+    return block();
+#endif
+}
+
 - (PhpResult*)executeInline:(NSString*)code 
                       stdinData:(NSData*)stdinData 
                         ini:(NSDictionary<NSString*, NSString*>*)iniSettings {
@@ -125,12 +174,14 @@ static size_t phpios_ub_write(const char *str, size_t str_length) {
     }
     
 #if TARGET_OS_IPHONE
-    return [self executePhpCode:code
-                      scriptPath:nil
-                            argv:nil
-                       stdinData:stdinData
-                             env:nil
-                             ini:iniSettings];
+    return [self executeOnPhpQueue:^PhpResult* {
+        return [self executePhpCode:code
+                          scriptPath:nil
+                                argv:nil
+                           stdinData:stdinData
+                                 env:nil
+                                 ini:iniSettings];
+    }];
 #else
     return [self evaluateMockCode:code stdinData:stdinData];
 #endif
@@ -156,12 +207,14 @@ static size_t phpios_ub_write(const char *str, size_t str_length) {
     }
 
 #if TARGET_OS_IPHONE
-    return [self executePhpCode:nil
-                      scriptPath:scriptPath
-                            argv:argv
-                       stdinData:stdinData
-                             env:env
-                             ini:iniSettings];
+    return [self executeOnPhpQueue:^PhpResult* {
+        return [self executePhpCode:nil
+                          scriptPath:scriptPath
+                                argv:argv
+                           stdinData:stdinData
+                                 env:env
+                                 ini:iniSettings];
+    }];
 #else
     NSError* readError = nil;
     NSString* scriptContents = [NSString stringWithContentsOfFile:scriptPath
@@ -191,6 +244,9 @@ static size_t phpios_ub_write(const char *str, size_t str_length) {
     NSString* bufferedOutput = @"";
     NSString* stderrOutput = @"";
     int32_t exitCode = 0;
+    NSDictionary<NSString*, NSArray<NSString*>*>* responseHeaders = @{};
+    int32_t statusCode = 200;
+    NSDictionary<NSString*, NSString*>* envValues = env ?: @{};
 
     [self applyEnvironment:env previousValues:previousEnv];
 
@@ -213,8 +269,9 @@ static size_t phpios_ub_write(const char *str, size_t str_length) {
     void (*prev_log_message)(const char*, int) = php_embed_module.log_message;
     void (*prev_sapi_error)(int, const char*, ...) = php_embed_module.sapi_error;
     size_t (*prev_ub_write)(const char*, size_t) = php_embed_module.ub_write;
-    phpios_stderr_data = stderrData;
-    phpios_stdout_data = [NSMutableData data];
+    phpios_set_thread_data(kPhpIOSStderrKey, stderrData);
+    NSMutableData* stdoutData = [NSMutableData data];
+    phpios_set_thread_data(kPhpIOSStdoutKey, stdoutData);
     php_embed_module.log_message = phpios_log_message;
     php_embed_module.sapi_error = phpios_sapi_error;
     php_embed_module.ub_write = phpios_ub_write;
@@ -223,8 +280,8 @@ static size_t phpios_ub_write(const char *str, size_t str_length) {
         php_embed_module.log_message = prev_log_message;
         php_embed_module.sapi_error = prev_sapi_error;
         php_embed_module.ub_write = prev_ub_write;
-        phpios_stderr_data = nil;
-        phpios_stdout_data = nil;
+        phpios_set_thread_data(kPhpIOSStderrKey, nil);
+        phpios_set_thread_data(kPhpIOSStdoutKey, nil);
         [self restoreEnvironment:previousEnv];
         [self freeArgv:cargv count:argc];
         return [[PhpResult alloc] initWithExitCode:1
@@ -237,9 +294,31 @@ static size_t phpios_ub_write(const char *str, size_t str_length) {
 
     SG(request_info).argc = argc;
     SG(request_info).argv = cargv;
-    SG(request_info).request_method = "GET";
+    NSString* requestMethod = envValues[@"REQUEST_METHOD"] ?: @"GET";
+    char* request_method = strdup([requestMethod UTF8String]);
+    SG(request_info).request_method = request_method;
     SG(request_info).no_headers = 1;
     SG(headers_sent) = 0;
+    SG(request_info).content_length = 0;
+    SG(request_info).content_type = NULL;
+    SG(request_info).cookie_data = NULL;
+
+    char* content_type = NULL;
+    char* cookie_data = NULL;
+    NSString* contentType = envValues[@"CONTENT_TYPE"];
+    if (contentType.length > 0) {
+        content_type = strdup([contentType UTF8String]);
+        SG(request_info).content_type = content_type;
+    }
+    NSString* contentLength = envValues[@"CONTENT_LENGTH"];
+    if (contentLength.length > 0) {
+        SG(request_info).content_length = (zend_long)strtol([contentLength UTF8String], NULL, 10);
+    }
+    NSString* cookieHeader = envValues[@"HTTP_COOKIE"];
+    if (cookieHeader.length > 0) {
+        cookie_data = strdup([cookieHeader UTF8String]);
+        SG(request_info).cookie_data = cookie_data;
+    }
 
     char* path_translated = NULL;
     char* request_uri = NULL;
@@ -248,8 +327,8 @@ static size_t phpios_ub_write(const char *str, size_t str_length) {
 
     if (scriptPath.length > 0) {
         NSString* scriptName = [@"/" stringByAppendingString:[scriptPath lastPathComponent]];
-        NSString* requestUri = env[@"REQUEST_URI"] ?: scriptName;
-        NSString* queryString = env[@"QUERY_STRING"] ?: @"";
+        NSString* requestUri = envValues[@"REQUEST_URI"] ?: scriptName;
+        NSString* queryString = envValues[@"QUERY_STRING"] ?: @"";
         NSString* scriptDir = [scriptPath stringByDeletingLastPathComponent];
 
         path_translated = strdup([scriptPath fileSystemRepresentation]);
@@ -263,11 +342,13 @@ static size_t phpios_ub_write(const char *str, size_t str_length) {
         previousDirectory = [[NSFileManager defaultManager] currentDirectoryPath];
         chdir([scriptDir fileSystemRepresentation]);
 
-        [self applyServerGlobalsForScriptPath:scriptPath env:env requestUri:requestUri queryString:queryString];
+        [self applyServerGlobalsForScriptPath:scriptPath env:envValues requestUri:requestUri queryString:queryString];
     }
 
     [self applyIniSettings:iniSettings];
-    [self applyPhpPrelude];
+    if ([self shouldApplyPhpPreludeForEnv:envValues]) {
+        [self applyPhpPrelude];
+    }
 
     int savedStdinFd = -1;
     int tempStdinFd = -1;
@@ -305,8 +386,8 @@ static size_t phpios_ub_write(const char *str, size_t str_length) {
     php_output_end_all();
     zval_ptr_dtor(&output);
 
-    if (phpios_stdout_data.length > 0) {
-        NSString* captured = [[NSString alloc] initWithData:phpios_stdout_data encoding:NSUTF8StringEncoding];
+    if (stdoutData.length > 0) {
+        NSString* captured = [[NSString alloc] initWithData:stdoutData encoding:NSUTF8StringEncoding];
         if (captured.length > 0) {
             stdoutOutput = captured;
         }
@@ -348,19 +429,45 @@ static size_t phpios_ub_write(const char *str, size_t str_length) {
         }
     }
 
+    responseHeaders = [self responseHeadersFromSapi:&statusCode];
+    if (exitCode != 0 && statusCode < 400) {
+        statusCode = 500;
+    }
+
     php_embed_shutdown();
     php_embed_module.log_message = prev_log_message;
     php_embed_module.sapi_error = prev_sapi_error;
     php_embed_module.ub_write = prev_ub_write;
-    phpios_stderr_data = nil;
-    phpios_stdout_data = nil;
+    phpios_set_thread_data(kPhpIOSStderrKey, nil);
+    phpios_set_thread_data(kPhpIOSStdoutKey, nil);
+
+    if (path_translated) {
+        free(path_translated);
+    }
+    if (request_uri) {
+        free(request_uri);
+    }
+    if (query_string) {
+        free(query_string);
+    }
+    if (request_method) {
+        free(request_method);
+    }
+    if (content_type) {
+        free(content_type);
+    }
+    if (cookie_data) {
+        free(cookie_data);
+    }
 
     [self restoreEnvironment:previousEnv];
     [self freeArgv:cargv count:argc];
 
     return [[PhpResult alloc] initWithExitCode:exitCode
                                        stdout:stdoutOutput ?: @""
-                                       stderr:stderrOutput ?: @""];
+                                       stderr:stderrOutput ?: @""
+                              responseHeaders:responseHeaders
+                                   statusCode:statusCode];
 }
 
 - (void)applyPhpPrelude {
@@ -575,6 +682,95 @@ static size_t phpios_ub_write(const char *str, size_t str_length) {
     zend_eval_string([prelude UTF8String], NULL, "PhpIOSPrelude");
 }
 
+- (BOOL)shouldApplyPhpPreludeForEnv:(NSDictionary<NSString*, NSString*>*)env {
+    NSString* flag = env[@"PHP_IOS_SHIMS"];
+    if (flag.length == 0) {
+        const char* envValue = getenv("PHP_IOS_SHIMS");
+        if (envValue) {
+            flag = [NSString stringWithUTF8String:envValue];
+        }
+    }
+    if (flag.length == 0) {
+        return YES;
+    }
+    NSString* lower = [flag lowercaseString];
+    return !([lower isEqualToString:@"0"] || [lower isEqualToString:@"false"] || [lower isEqualToString:@"off"]);
+}
+
+- (NSDictionary<NSString*, NSArray<NSString*>*>*)responseHeadersFromSapi:(int32_t*)statusOut {
+    NSMutableDictionary<NSString*, NSMutableArray<NSString*>*>* headers = [NSMutableDictionary dictionary];
+    int32_t statusCode = SG(sapi_headers).http_response_code;
+    if (statusCode <= 0) {
+        statusCode = 200;
+    }
+
+    zend_llist_position pos;
+    for (sapi_header_struct* header = (sapi_header_struct*)zend_llist_get_first_ex(&SG(sapi_headers).headers, &pos);
+         header != NULL;
+         header = (sapi_header_struct*)zend_llist_get_next_ex(&SG(sapi_headers).headers, &pos)) {
+        if (!header->header || header->header_len == 0) {
+            continue;
+        }
+        NSString* raw = [[NSString alloc] initWithBytes:header->header
+                                                length:header->header_len
+                                              encoding:NSUTF8StringEncoding];
+        if (raw.length == 0) {
+            raw = [NSString stringWithUTF8String:header->header] ?: @"";
+        }
+        NSString* line = [raw stringByTrimmingCharactersInSet:[NSCharacterSet whitespaceAndNewlineCharacterSet]];
+        if (line.length == 0) {
+            continue;
+        }
+        NSString* lower = [line lowercaseString];
+        if ([lower hasPrefix:@"http/"]) {
+            NSArray<NSString*>* parts = [line componentsSeparatedByString:@" "];
+            if (parts.count >= 2) {
+                NSInteger code = [parts[1] integerValue];
+                if (code > 0) {
+                    statusCode = (int32_t)code;
+                }
+            }
+            continue;
+        }
+        if ([lower hasPrefix:@"status:"]) {
+            NSString* value = [[line substringFromIndex:7] stringByTrimmingCharactersInSet:[NSCharacterSet whitespaceAndNewlineCharacterSet]];
+            NSInteger code = [[[value componentsSeparatedByString:@" "] firstObject] integerValue];
+            if (code > 0) {
+                statusCode = (int32_t)code;
+            }
+            continue;
+        }
+        NSRange colonRange = [line rangeOfString:@":"];
+        if (colonRange.location == NSNotFound) {
+            continue;
+        }
+        NSString* key = [[line substringToIndex:colonRange.location] stringByTrimmingCharactersInSet:[NSCharacterSet whitespaceAndNewlineCharacterSet]];
+        NSString* value = [[line substringFromIndex:colonRange.location + 1] stringByTrimmingCharactersInSet:[NSCharacterSet whitespaceAndNewlineCharacterSet]];
+        if (key.length == 0) {
+            continue;
+        }
+        NSString* lowerKey = [key lowercaseString];
+        NSMutableArray<NSString*>* values = headers[lowerKey];
+        if (!values) {
+            values = [NSMutableArray array];
+            headers[lowerKey] = values;
+        }
+        if (value.length > 0) {
+            [values addObject:value];
+        }
+    }
+
+    NSMutableDictionary<NSString*, NSArray<NSString*>*>* frozen = [NSMutableDictionary dictionaryWithCapacity:headers.count];
+    for (NSString* key in headers) {
+        frozen[key] = [headers[key] copy];
+    }
+
+    if (statusOut) {
+        *statusOut = statusCode;
+    }
+    return [frozen copy];
+}
+
 - (void)applyIniSettings:(NSDictionary<NSString*, NSString*>*)iniSettings {
     if (iniSettings.count == 0) {
         return;
@@ -592,8 +788,9 @@ static size_t phpios_ub_write(const char *str, size_t str_length) {
                                     env:(NSDictionary<NSString*, NSString*>*)env
                              requestUri:(NSString*)requestUri
                             queryString:(NSString*)queryString {
-    NSString* documentRoot = env[@"DOCUMENT_ROOT"] ?: [scriptPath stringByDeletingLastPathComponent];
-    NSString* scriptName = env[@"SCRIPT_NAME"];
+    NSDictionary<NSString*, NSString*>* envValues = env ?: @{};
+    NSString* documentRoot = envValues[@"DOCUMENT_ROOT"] ?: [scriptPath stringByDeletingLastPathComponent];
+    NSString* scriptName = envValues[@"SCRIPT_NAME"];
     if (!scriptName) {
         NSString* normalizedRoot = [documentRoot stringByStandardizingPath];
         NSString* normalizedScript = [scriptPath stringByStandardizingPath];
@@ -610,80 +807,55 @@ static size_t phpios_ub_write(const char *str, size_t str_length) {
             scriptName = [@"/" stringByAppendingString:[scriptPath lastPathComponent]];
         }
     }
-    NSString* phpSelf = env[@"PHP_SELF"] ?: scriptName;
-    NSString* serverName = env[@"SERVER_NAME"] ?: env[@"HTTP_HOST"] ?: @"localhost";
-    NSString* httpHost = env[@"HTTP_HOST"] ?: serverName;
-    NSString* serverPort = env[@"SERVER_PORT"] ?: @"80";
-    NSString* requestScheme = env[@"REQUEST_SCHEME"] ?: @"http";
-    NSString* https = env[@"HTTPS"] ?: @"off";
-    NSString* requestMethod = env[@"REQUEST_METHOD"] ?: @"GET";
-    NSString* serverProtocol = env[@"SERVER_PROTOCOL"] ?: @"HTTP/1.1";
-    NSString* httpAccept = env[@"HTTP_ACCEPT"] ?: @"text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8";
-    NSString* httpAcceptLanguage = env[@"HTTP_ACCEPT_LANGUAGE"] ?: @"en-US,en;q=0.9";
-    NSString* httpUserAgent = env[@"HTTP_USER_AGENT"] ?: @"PhpIOS/1.0";
-    NSString* httpReferer = env[@"HTTP_REFERER"] ?: @"";
+    NSString* phpSelf = envValues[@"PHP_SELF"] ?: scriptName;
+    NSString* serverName = envValues[@"SERVER_NAME"] ?: envValues[@"HTTP_HOST"] ?: @"localhost";
+    NSString* httpHost = envValues[@"HTTP_HOST"] ?: serverName;
+    NSString* serverPort = envValues[@"SERVER_PORT"] ?: @"80";
+    NSString* requestScheme = envValues[@"REQUEST_SCHEME"] ?: @"http";
+    NSString* https = envValues[@"HTTPS"] ?: @"off";
+    NSString* requestMethod = envValues[@"REQUEST_METHOD"] ?: @"GET";
+    NSString* serverProtocol = envValues[@"SERVER_PROTOCOL"] ?: @"HTTP/1.1";
+    NSString* httpAccept = envValues[@"HTTP_ACCEPT"] ?: @"text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8";
+    NSString* httpAcceptLanguage = envValues[@"HTTP_ACCEPT_LANGUAGE"] ?: @"en-US,en;q=0.9";
+    NSString* httpUserAgent = envValues[@"HTTP_USER_AGENT"] ?: @"PhpIOS/1.0";
+    NSString* httpReferer = envValues[@"HTTP_REFERER"] ?: @"";
+    NSString* contentType = envValues[@"CONTENT_TYPE"] ?: @"";
+    NSString* contentLength = envValues[@"CONTENT_LENGTH"] ?: @"";
+    NSString* httpCookie = envValues[@"HTTP_COOKIE"] ?: @"";
 
-    NSString* escapedScript = [self phpEscapedString:scriptPath];
-    NSString* escapedScriptName = [self phpEscapedString:scriptName];
-    NSString* escapedRequest = [self phpEscapedString:requestUri ?: scriptName];
-    NSString* escapedQuery = [self phpEscapedString:queryString ?: @""];
-    NSString* escapedDocRoot = [self phpEscapedString:documentRoot];
-    NSString* escapedSelf = [self phpEscapedString:phpSelf];
-    NSString* escapedServerName = [self phpEscapedString:serverName];
-    NSString* escapedHttpHost = [self phpEscapedString:httpHost];
-    NSString* escapedServerPort = [self phpEscapedString:serverPort];
-    NSString* escapedRequestScheme = [self phpEscapedString:requestScheme];
-    NSString* escapedHttps = [self phpEscapedString:https];
-    NSString* escapedRequestMethod = [self phpEscapedString:requestMethod];
-    NSString* escapedServerProtocol = [self phpEscapedString:serverProtocol];
-    NSString* escapedHttpAccept = [self phpEscapedString:httpAccept];
-    NSString* escapedHttpAcceptLanguage = [self phpEscapedString:httpAcceptLanguage];
-    NSString* escapedHttpUserAgent = [self phpEscapedString:httpUserAgent];
-    NSString* escapedHttpReferer = [self phpEscapedString:httpReferer];
+    zend_is_auto_global_str(ZEND_STRL("_SERVER"));
+    zval* server = &PG(http_globals)[TRACK_VARS_SERVER];
+    if (Z_TYPE_P(server) != IS_ARRAY) {
+        array_init(server);
+    }
 
-    NSString* serverSetup = [NSString stringWithFormat:
-                             @"$_SERVER['SCRIPT_FILENAME']='%@';"
-                             @"$_SERVER['SCRIPT_NAME']='%@';"
-                             @"$_SERVER['REQUEST_URI']='%@';"
-                             @"$_SERVER['QUERY_STRING']='%@';"
-                             @"$_SERVER['DOCUMENT_ROOT']='%@';"
-                             @"$_SERVER['REQUEST_METHOD']='%@';"
-                             @"$_SERVER['SERVER_PROTOCOL']='%@';"
-                             @"$_SERVER['PHP_SELF']='%@';"
-                             @"$_SERVER['SERVER_SOFTWARE']='PHP-iOS';"
-                             @"$_SERVER['SERVER_NAME']='%@';"
-                             @"$_SERVER['HTTP_HOST']='%@';"
-                             @"$_SERVER['HTTP_ACCEPT']='%@';"
-                             @"$_SERVER['HTTP_ACCEPT_LANGUAGE']='%@';"
-                             @"$_SERVER['HTTP_USER_AGENT']='%@';"
-                             @"$_SERVER['HTTP_REFERER']='%@';"
-                             @"$_SERVER['SERVER_PORT']='%@';"
-                             @"$_SERVER['REQUEST_SCHEME']='%@';"
-                             @"$_SERVER['HTTPS']='%@';",
-                             escapedScript,
-                             escapedScriptName,
-                             escapedRequest,
-                             escapedQuery,
-                             escapedDocRoot,
-                             escapedRequestMethod,
-                             escapedServerProtocol,
-                             escapedSelf,
-                             escapedServerName,
-                             escapedHttpHost,
-                             escapedHttpAccept,
-                             escapedHttpAcceptLanguage,
-                             escapedHttpUserAgent,
-                             escapedHttpReferer,
-                             escapedServerPort,
-                             escapedRequestScheme,
-                             escapedHttps];
-    zend_eval_string([serverSetup UTF8String], NULL, "PhpIOS");
-}
-
-- (NSString*)phpEscapedString:(NSString*)value {
-    NSString* escaped = [value stringByReplacingOccurrencesOfString:@"\\" withString:@"\\\\"];
-    escaped = [escaped stringByReplacingOccurrencesOfString:@"'" withString:@"\\'"];
-    return escaped;
+    phpios_register_server_var(server, "SCRIPT_FILENAME", scriptPath);
+    phpios_register_server_var(server, "SCRIPT_NAME", scriptName);
+    phpios_register_server_var(server, "REQUEST_URI", requestUri ?: scriptName);
+    phpios_register_server_var(server, "QUERY_STRING", queryString ?: @"");
+    phpios_register_server_var(server, "DOCUMENT_ROOT", documentRoot);
+    phpios_register_server_var(server, "REQUEST_METHOD", requestMethod);
+    phpios_register_server_var(server, "SERVER_PROTOCOL", serverProtocol);
+    phpios_register_server_var(server, "PHP_SELF", phpSelf);
+    phpios_register_server_var(server, "SERVER_SOFTWARE", @"PHP-iOS");
+    phpios_register_server_var(server, "SERVER_NAME", serverName);
+    phpios_register_server_var(server, "HTTP_HOST", httpHost);
+    phpios_register_server_var(server, "HTTP_ACCEPT", httpAccept);
+    phpios_register_server_var(server, "HTTP_ACCEPT_LANGUAGE", httpAcceptLanguage);
+    phpios_register_server_var(server, "HTTP_USER_AGENT", httpUserAgent);
+    phpios_register_server_var(server, "HTTP_REFERER", httpReferer);
+    phpios_register_server_var(server, "SERVER_PORT", serverPort);
+    phpios_register_server_var(server, "REQUEST_SCHEME", requestScheme);
+    phpios_register_server_var(server, "HTTPS", https);
+    if (contentType.length > 0) {
+        phpios_register_server_var(server, "CONTENT_TYPE", contentType);
+    }
+    if (contentLength.length > 0) {
+        phpios_register_server_var(server, "CONTENT_LENGTH", contentLength);
+    }
+    if (httpCookie.length > 0) {
+        phpios_register_server_var(server, "HTTP_COOKIE", httpCookie);
+    }
 }
 
 - (void)redirectStdin:(NSData*)stdinData
@@ -973,11 +1145,25 @@ static size_t phpios_ub_write(const char *str, size_t str_length) {
 @implementation PhpResult
 
 - (instancetype)initWithExitCode:(int32_t)exitCode stdout:(NSString*)stdoutOutput stderr:(NSString*)stderrOutput {
+    return [self initWithExitCode:exitCode
+                           stdout:stdoutOutput
+                           stderr:stderrOutput
+                  responseHeaders:@{}
+                       statusCode:200];
+}
+
+- (instancetype)initWithExitCode:(int32_t)exitCode
+                          stdout:(NSString*)stdoutOutput
+                          stderr:(NSString*)stderrOutput
+                 responseHeaders:(NSDictionary<NSString*, NSArray<NSString*>*>*)responseHeaders
+                      statusCode:(int32_t)statusCode {
     self = [super init];
     if (self) {
         _exitCode = exitCode;
         _stdoutOutput = stdoutOutput ?: @"";
         _stderrOutput = stderrOutput ?: @"";
+        _responseHeaders = responseHeaders ?: @{};
+        _statusCode = statusCode;
     }
     return self;
 }

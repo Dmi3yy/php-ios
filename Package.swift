@@ -3,16 +3,7 @@ import Foundation
 import PackageDescription
 
 let packageDir = URL(fileURLWithPath: #file).deletingLastPathComponent().path
-let env = ProcessInfo.processInfo.environment
-let sdkName = env["SDK_NAME"] ?? ""
-let effectivePlatform = env["EFFECTIVE_PLATFORM_NAME"] ?? ""
-let platformName = env["PLATFORM_NAME"] ?? ""
-let isSimulator = sdkName.contains("iphonesimulator")
-    || effectivePlatform == "-iphonesimulator"
-    || platformName == "iphonesimulator"
-
-let phpLibDir = env["PHP_IOS_LIB_DIR"]
-    ?? (isSimulator ? "\(packageDir)/Sources/PhpIOS/lib-sim" : "\(packageDir)/Sources/PhpIOS/lib")
+let phpIncludeDir = "\(packageDir)/Sources/PhpIOS/lib/include"
 
 let package = Package(
     name: "PhpIOS",
@@ -27,32 +18,34 @@ let package = Package(
     ],
     dependencies: [],
     targets: [
+        .binaryTarget(
+            name: "PhpIOSCore",
+            path: "Sources/PhpIOS/libphp-ios.xcframework"
+        ),
         .target(
             name: "PhpIOSBridge",
-            dependencies: [],
+            dependencies: ["PhpIOSCore"],
             path: "Sources/PhpIOSBridge",
             exclude: ["../PhpIOS/lib", "../PhpIOS/lib-sim"],
             publicHeadersPath: ".",
             cSettings: [
-                .unsafeFlags(["-I", "\(phpLibDir)/include/php/Zend"], .when(platforms: [.iOS])),
-                .unsafeFlags(["-I", "\(phpLibDir)/include/php/TSRM"], .when(platforms: [.iOS])),
-                .unsafeFlags(["-I", "\(phpLibDir)/include/php/main"], .when(platforms: [.iOS])),
-                .unsafeFlags(["-I", "\(phpLibDir)/include/php"], .when(platforms: [.iOS])),
-                .unsafeFlags(["-I", "\(phpLibDir)/include"], .when(platforms: [.iOS]))
+                .unsafeFlags(["-I", "\(phpIncludeDir)/php/Zend"], .when(platforms: [.iOS])),
+                .unsafeFlags(["-I", "\(phpIncludeDir)/php/TSRM"], .when(platforms: [.iOS])),
+                .unsafeFlags(["-I", "\(phpIncludeDir)/php/main"], .when(platforms: [.iOS])),
+                .unsafeFlags(["-I", "\(phpIncludeDir)/php"], .when(platforms: [.iOS])),
+                .unsafeFlags(["-I", "\(phpIncludeDir)"], .when(platforms: [.iOS]))
             ],
             cxxSettings: [
-                .unsafeFlags(["-I", "\(phpLibDir)/include/php/Zend"], .when(platforms: [.iOS])),
-                .unsafeFlags(["-I", "\(phpLibDir)/include/php/TSRM"], .when(platforms: [.iOS])),
-                .unsafeFlags(["-I", "\(phpLibDir)/include/php/main"], .when(platforms: [.iOS])),
-                .unsafeFlags(["-I", "\(phpLibDir)/include/php"], .when(platforms: [.iOS])),
-                .unsafeFlags(["-I", "\(phpLibDir)/include"], .when(platforms: [.iOS]))
+                .unsafeFlags(["-I", "\(phpIncludeDir)/php/Zend"], .when(platforms: [.iOS])),
+                .unsafeFlags(["-I", "\(phpIncludeDir)/php/TSRM"], .when(platforms: [.iOS])),
+                .unsafeFlags(["-I", "\(phpIncludeDir)/php/main"], .when(platforms: [.iOS])),
+                .unsafeFlags(["-I", "\(phpIncludeDir)/php"], .when(platforms: [.iOS])),
+                .unsafeFlags(["-I", "\(phpIncludeDir)"], .when(platforms: [.iOS]))
             ],
             linkerSettings: [
                 .linkedLibrary("resolv", .when(platforms: [.iOS])),
                 .linkedLibrary("sqlite3", .when(platforms: [.iOS])),
                 .linkedLibrary("xml2", .when(platforms: [.iOS])),
-                .linkedLibrary("php-ios", .when(platforms: [.iOS])),
-                .unsafeFlags(["-L", phpLibDir], .when(platforms: [.iOS])),
                 .unsafeFlags(["-Xlinker", "-ObjC"], .when(platforms: [.iOS]))
             ]
         ),
